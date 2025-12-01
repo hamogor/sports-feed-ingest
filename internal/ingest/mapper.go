@@ -12,26 +12,27 @@ func MapECBToArticle(e ECBArticle) (article.Article, error) {
 		Type:         e.Type,
 		Title:        e.Title,
 		Description:  e.Description,
-		Date:         parseTime(e.Date),
+		Date:         parseDate(e.Date),
 		Location:     e.Location,
 		Language:     e.Language,
 		CanonicalURL: e.CanonicalURL,
-		LastModified: e.LastModified,
+		LastModified: parseUnixTime(e.LastModified),
 		Body:         e.Body,
 		Summary:      e.Summary,
 		LeadMedia: article.LeadMedia{
 			ID:           e.LeadMedia.ID,
 			Type:         e.LeadMedia.Type,
 			Title:        e.LeadMedia.Title,
-			Date:         parseTime(e.LeadMedia.Date),
+			Date:         parseDate(e.LeadMedia.Date),
 			Language:     e.LeadMedia.Language,
 			ImageURL:     e.LeadMedia.ImageURL,
-			LastModified: e.LeadMedia.LastModified,
+			LastModified: parseUnixTime(e.LeadMedia.LastModified),
 		},
 	}, nil
 }
 
-func parseTime(value string) time.Time {
+// parseDate example "2025-12-01T09:15:00Z"
+func parseDate(value string) time.Time {
 	if value == "" {
 		return time.Time{}
 	}
@@ -40,4 +41,16 @@ func parseTime(value string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// parseUnixTime example `1764580500000`
+func parseUnixTime(n int64) time.Time {
+	if n == 0 {
+		return time.Time{}
+	}
+	// detect milliseconds vs seconds
+	if n > 9999999999 {
+		return time.UnixMilli(n)
+	}
+	return time.Unix(n, 0)
 }

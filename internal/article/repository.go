@@ -2,6 +2,7 @@ package article
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -54,51 +55,82 @@ func (r *mongoRepository) ensureIndexes(ctx context.Context) error {
 // UpsertByExternalID uses the ID from content-ecb feed to upsert data within db
 // returns true if an article was created / updated.
 func (r *mongoRepository) UpsertByExternalID(ctx context.Context, a *Article) (bool, error) {
-	now := time.Now().UTC()
-	if a.CreatedAt.IsZero() {
+	now := time.Now()
+
+	res := r.col.FindOne(ctx, bson.M{"externalId": a.ExternalID})
+	if errors.Is(res.Err(), mongo.ErrNoDocuments) {
+		// insert new article
+		log.Printf("inserting new article: %d", a.ExternalID)
 		a.CreatedAt = now
-	}
-	a.ModifiedAt = now
+		a.ModifiedAt = now
 
-	filter := bson.M{"externalId": a.ExternalID}
+		_, err := r.col.InsertOne(ctx, a)
+		if err != nil {
+			return false, err
+		}
 
-	update := bson.M{
-		"$set": bson.M{
-			"type":         a.Type,
-			"title":        a.Title,
-			"description":  a.Description,
-			"date":         a.Date,
-			"location":     a.Location,
-			"language":     a.Language,
-			"canonicalUrl": a.CanonicalURL,
-			"lastModified": a.LastModified,
-
-			"body":    a.Body,
-			"summary": a.Summary,
-
-			"leadMedia": bson.M{
-				"id":           a.LeadMedia.ID,
-				"type":         a.LeadMedia.Type,
-				"title":        a.LeadMedia.Title,
-				"date":         a.LeadMedia.Date,
-				"language":     a.LeadMedia.Language,
-				"imageUrl":     a.LeadMedia.ImageURL,
-				"lastModified": a.LeadMedia.LastModified,
-			},
-
-			"modifiedAt": a.ModifiedAt,
-		},
-		"$setOnInsert": bson.M{
-			"createdAt": a.CreatedAt,
-		},
+		return true, nil
 	}
 
-	res, err := r.col.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
+	if res.Err() != nil {
+		return false, res.Err()
+	}
+
+	existing := Article{}
+	err := res.Decode(&existing)
 	if err != nil {
 		return false, err
 	}
 
-	// new insert or actual update
-	changed := res.UpsertedCount == 1 || res.ModifiedCount == 1
-	return changed, nil
+	// Existing article: main article lastModified is later than what is stored
+	shouldUpdateArticle := !a.LastModified.IsZero() && a.LastModified.After(existing.LastModified)
+
+	// Existing article: the leadMedia lastModified is later than what is stored in mongo
+	shouldUpdateMedia := !a.LeadMedia.LastModified.IsZero() && a.LeadMedia.LastModified.After(existing.LeadMedia.LastModified)
+
+	if !shouldUpdateArticle && !shouldUpdateMedia {
+		// nothing new, skip update
+		return false, nil
+	}
+
+	set := bson.M{}
+	if shouldUpdateArticle {
+		log.Printf("updating article with newer lastModified: %v", a.ExternalID)
+		set["type"] = a.Type
+		set["title"] = a.Title
+		set["description"] = a.Description
+		set["date"] = a.Date
+		set["location"] = a.Location
+		set["language"] = a.Language
+		set["canonicalUrl"] = a.CanonicalURL
+		set["lastModified"] = a.LastModified
+		set["body"] = a.Body
+		set["summary"] = a.Summary
+	}
+
+	if shouldUpdateMedia {
+		log.Printf("updating lead media with newer lastModified: %v", a.ExternalID)
+		set["leadMedia"] = bson.M{
+			"id":           a.LeadMedia.ID,
+			"type":         a.LeadMedia.Type,
+			"title":        a.LeadMedia.Title,
+			"date":         a.LeadMedia.Date,
+			"language":     a.LeadMedia.Language,
+			"imageUrl":     a.LeadMedia.ImageURL,
+			"lastModified": a.LeadMedia.LastModified,
+		}
+	}
+
+	set["modifiedAt"] = now
+
+	_, err = r.col.UpdateOne(
+		ctx,
+		bson.M{"externalId": a.ExternalID},
+		bson.M{"$set": set},
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }

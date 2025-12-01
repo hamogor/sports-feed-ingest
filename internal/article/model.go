@@ -15,7 +15,7 @@ type Article struct {
 	Location     string             `bson:"location"`
 	Language     string             `bson:"language"`
 	CanonicalURL string             `bson:"canonicalUrl"`
-	LastModified int64              `bson:"lastModified"`
+	LastModified time.Time          `bson:"lastModified"`
 	Body         string             `bson:"body"`
 	Summary      string             `bson:"summary"`
 	LeadMedia    LeadMedia          `bson:"leadMedia"`
@@ -30,5 +30,5 @@ type LeadMedia struct {
 	Date         time.Time `bson:"date"`
 	Language     string    `bson:"language"`
 	ImageURL     string    `bson:"imageUrl"`
-	LastModified int64     `bson:"lastModified"`
+	LastModified time.Time `bson:"lastModified"`
 }

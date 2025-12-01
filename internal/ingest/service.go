@@ -64,12 +64,9 @@ func (s *Service) RunOnce(ctx context.Context) error {
 				s.logger.Printf("mapping failed for %d: %v", ecbArt.ID, err)
 				continue
 			}
-			updated, err := s.repo.UpsertByExternalID(ctx, &art)
+			_, err = s.repo.UpsertByExternalID(ctx, &art)
 			if err != nil {
 				log.Printf("failed to upsert for %d: %v", ecbArt.ID, err)
-			}
-			if updated {
-				log.Printf("updated article: %v", art.ExternalID)
 			}
 		}
 
