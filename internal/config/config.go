@@ -8,21 +8,31 @@ import (
 )
 
 type Config struct {
-	MongoURI     string
-	MongoDBName  string
-	FeedURL      string
-	PageSize     int
-	MaxPages     int // -1 to ingest all pages
-	MaxPolls     int // -1 is unlimited
-	Timeout      time.Duration
-	PollInterval time.Duration
+	MongoURI         string
+	MongoDBName      string
+	FeedURL          string
+	PageSize         int
+	MaxPages         int // -1 to ingest all pages
+	MaxPolls         int // -1 is unlimited
+	Timeout          time.Duration
+	PollInterval     time.Duration
+	RabbitURI        string
+	RabbitExchange   string
+	RabbitRoutingKey string
 }
 
 const (
-	MongoURI    = "MONGO_URI"
-	MongoDBName = "MONGO_DB_NAME"
-	FeedURL     = "FEED_URL"
-	PageSize    = "PAGE_SIZE"
+	MongoURI            = "MONGO_URI"
+	MongoDBName         = "MONGO_DB_NAME"
+	FeedURL             = "FEED_URL"
+	PageSize            = "PAGE_SIZE"
+	MaxPolls            = "MAX_POLLS"
+	MaxPages            = "MAX_PAGES"
+	Timeout             = "TIMEOUT"
+	PollInterval        = "POLL_INTERVAL"
+	RabbitURIEnv        = "RABBIT_URI"
+	RabbitExchangeEnv   = "RABBIT_EXCHANGE"
+	RabbitRoutingKeyEnv = "RABBIT_ROUTING_KEY"
 )
 
 func FromEnv() (Config, error) {
@@ -31,23 +41,27 @@ func FromEnv() (Config, error) {
 	cfg.MongoURI = getEnv(MongoURI, "mongodb://localhost:27017")
 	cfg.MongoDBName = getEnv(MongoDBName, "newsdb")
 	cfg.FeedURL = getEnv(FeedURL, "https://content-ecb.pulselive.com/content/ecb/text/EN/")
-
-	cfg.MaxPolls = -1
-	cfg.PageSize = 20
-	cfg.MaxPages = 100
-	cfg.Timeout = time.Second * 10
-	cfg.PollInterval = time.Second * 5
+	cfg.RabbitURI = getEnv(RabbitURIEnv, "amqp://guest:guest@localhost:5672/")
+	cfg.RabbitExchange = getEnv(RabbitExchangeEnv, "cms.sync")
+	cfg.RabbitRoutingKey = getEnv(RabbitRoutingKeyEnv, "article.updated")
 
 	var err error
-	if cfg.PageSize, err = getEnvInt("PAGE_SIZE", 20); err != nil {
-		return cfg, fmt.Errorf("invalid PAGE_SIZE: %w", err)
+	if cfg.PageSize, err = getEnvInt(PageSize, 20); err != nil {
+		return cfg, fmt.Errorf("invalid %v: %w", PageSize, err)
 	}
-	if cfg.MaxPages, err = getEnvInt("MAX_PAGES", 5); err != nil {
-		return cfg, fmt.Errorf("invalid MAX_PAGES: %w", err)
+	if cfg.MaxPolls, err = getEnvInt(MaxPolls, -1); err != nil {
+		return cfg, fmt.Errorf("invalid %v: %w", MaxPolls, err)
 	}
-	timeoutStr := getEnv("HTTP_TIMEOUT", "10s")
+	if cfg.MaxPages, err = getEnvInt(MaxPages, 5); err != nil {
+		return cfg, fmt.Errorf("invalid %v: %w", MaxPages, err)
+	}
+	timeoutStr := getEnv(Timeout, "10s")
 	if cfg.Timeout, err = time.ParseDuration(timeoutStr); err != nil {
-		return cfg, fmt.Errorf("invalid HTTP_TIMEOUT: %w", err)
+		return cfg, fmt.Errorf("invalid %v: %w", Timeout, err)
+	}
+	pollIntervalStr := getEnv(PollInterval, "5s")
+	if cfg.PollInterval, err = time.ParseDuration(pollIntervalStr); err != nil {
+		return cfg, fmt.Errorf("invalid %v: %w", PollInterval, err)
 	}
 
 	return cfg, nil

@@ -7,12 +7,35 @@ import (
 	"time"
 )
 
+const AbsoluteMaxPages = 5000 // absolute max amount of pages we can ingest
+
 type ArticleRepo interface {
 	UpsertByExternalID(ctx context.Context, a *article.Article) (bool, error)
 }
 
 type FeedClient interface {
 	FetchPage(ctx context.Context, page, pageSize int) (ECBResponse, error)
+}
+
+// ticker is a tiny interface so we can swap out time.Ticker in tests.
+type ticker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type tickerFactory func(d time.Duration) ticker
+
+// timeTicker is the real implementation backed by time.Ticker.
+type timeTicker struct {
+	*time.Ticker
+}
+
+func (t *timeTicker) C() <-chan time.Time {
+	return t.Ticker.C
+}
+
+func (t *timeTicker) Stop() {
+	t.Ticker.Stop()
 }
 
 type Service struct {
@@ -22,9 +45,15 @@ type Service struct {
 	maxPages int
 	maxPolls int
 	logger   *log.Logger
+
+	newTicker tickerFactory
 }
 
 func NewService(repo ArticleRepo, client FeedClient, pageSize, maxPages, maxPolls int, logger *log.Logger) *Service {
+	if logger == nil {
+		logger = log.Default()
+	}
+
 	return &Service{
 		repo:     repo,
 		client:   client,
@@ -32,13 +61,15 @@ func NewService(repo ArticleRepo, client FeedClient, pageSize, maxPages, maxPoll
 		maxPages: maxPages,
 		maxPolls: maxPolls,
 		logger:   logger,
+		newTicker: func(d time.Duration) ticker {
+			return &timeTicker{time.NewTicker(d)}
+		},
 	}
 }
 
 func (s *Service) RunOnce(ctx context.Context) error {
-	page := 0                     // current page
-	emptyCount := 0               // how many times we've seen an empty page (in a row)
-	const AbsoluteMaxPages = 5000 // absolute max amount of pages we can ingest.
+	page := 0       // current page
+	emptyCount := 0 // how many times we've seen an empty page (in a row)
 
 	for {
 		resp, err := s.client.FetchPage(ctx, page, s.pageSize)
@@ -46,7 +77,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			return err
 		}
 
-		// Found an empty page, increment `emptyPage`
+		// Found an empty page, increment `emptyCount`
 		if len(resp.Content) == 0 {
 			emptyCount++
 			if emptyCount >= 3 {
@@ -66,13 +97,13 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			}
 			_, err = s.repo.UpsertByExternalID(ctx, &art)
 			if err != nil {
-				log.Printf("failed to upsert for %d: %v", ecbArt.ID, err)
+				// use the service logger (not the global one) so tests can capture this
+				s.logger.Printf("failed to upsert for %d: %v", ecbArt.ID, err)
 			}
 		}
 
 		page++
 
-		// Not a huge fan of this...
 		if page >= AbsoluteMaxPages {
 			s.logger.Printf("safety stop: %d pages scanned", AbsoluteMaxPages)
 			return nil
@@ -91,8 +122,8 @@ func (s *Service) RunOnce(ctx context.Context) error {
 }
 
 func (s *Service) StartPolling(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	t := s.newTicker(interval)
+	defer t.Stop()
 
 	pollCount := 0
 
@@ -104,7 +135,7 @@ func (s *Service) StartPolling(ctx context.Context, interval time.Duration) {
 			s.logger.Println("poller stopping — context cancelled")
 			return
 
-		case <-ticker.C:
+		case <-t.C():
 			pollCount++
 
 			// EXTRA GUARDBLOCK: stop after max polls

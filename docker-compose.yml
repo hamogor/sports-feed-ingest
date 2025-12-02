@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: news-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: news-rabbit
+    ports:
+      - "5672:5672"      # AMQP
+      - "15672:15672"    # Management UI: http://localhost:15672 (guest/guest)
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  app:
+    build: .
+    container_name: news-sync
+    depends_on:
+      - mongo
+      - rabbitmq
+    environment:
+      # Mongo config
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB_NAME: newsdb
+
+      # External feed
+      FEED_URL: https://content-ecb.pulselive.com/content/ecb/text/EN/
+
+      # Ingestion config
+      PAGE_SIZE: 20
+      MAX_PAGES: 5       # -1 to ingest all pages
+      MAX_POLLS: -1      # -1 for unlimited polling
+      TIMEOUT: 10s
+      POLL_INTERVAL: 5s
+
+      # RabbitMQ config
+      RABBIT_URI: amqp://guest:guest@rabbitmq:5672/
+      RABBIT_EXCHANGE: cms.sync
+      RABBIT_ROUTING_KEY: article.updated
+
+    ports:
+      - "8080:8080"      # exposes /healthz
+
+volumes:
+  mongo-data:

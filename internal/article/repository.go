@@ -49,6 +49,10 @@ func (r *mongoRepository) ensureIndexes(ctx context.Context) error {
 		},
 	}
 	_, err := r.col.Indexes().CreateMany(ctx, indexes)
+
+	if err != nil && r.logger != nil {
+		r.logger.Printf("failed to create indexes: %v", err)
+	}
 	return err
 }
 
@@ -59,8 +63,10 @@ func (r *mongoRepository) UpsertByExternalID(ctx context.Context, a *Article) (b
 
 	res := r.col.FindOne(ctx, bson.M{"externalId": a.ExternalID})
 	if errors.Is(res.Err(), mongo.ErrNoDocuments) {
-		// insert new article
-		log.Printf("inserting new article: %d", a.ExternalID)
+		if r.logger != nil {
+			r.logger.Printf("inserting new article: %d", a.ExternalID)
+		}
+
 		a.CreatedAt = now
 		a.ModifiedAt = now
 
@@ -82,20 +88,19 @@ func (r *mongoRepository) UpsertByExternalID(ctx context.Context, a *Article) (b
 		return false, err
 	}
 
-	// Existing article: main article lastModified is later than what is stored
 	shouldUpdateArticle := !a.LastModified.IsZero() && a.LastModified.After(existing.LastModified)
-
-	// Existing article: the leadMedia lastModified is later than what is stored in mongo
 	shouldUpdateMedia := !a.LeadMedia.LastModified.IsZero() && a.LeadMedia.LastModified.After(existing.LeadMedia.LastModified)
 
 	if !shouldUpdateArticle && !shouldUpdateMedia {
-		// nothing new, skip update
 		return false, nil
 	}
 
 	set := bson.M{}
 	if shouldUpdateArticle {
-		log.Printf("updating article with newer lastModified: %v", a.ExternalID)
+		if r.logger != nil {
+			r.logger.Printf("updating article with newer lastModified: %v", a.ExternalID)
+		}
+
 		set["type"] = a.Type
 		set["title"] = a.Title
 		set["description"] = a.Description
@@ -109,7 +114,10 @@ func (r *mongoRepository) UpsertByExternalID(ctx context.Context, a *Article) (b
 	}
 
 	if shouldUpdateMedia {
-		log.Printf("updating lead media with newer lastModified: %v", a.ExternalID)
+		if r.logger != nil {
+			r.logger.Printf("updating lead media with newer lastModified: %v", a.ExternalID)
+		}
+
 		set["leadMedia"] = bson.M{
 			"id":           a.LeadMedia.ID,
 			"type":         a.LeadMedia.Type,
