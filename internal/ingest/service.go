@@ -9,15 +9,11 @@ import (
 
 const AbsoluteMaxPages = 5000 // absolute max amount of pages we can ingest
 
-type ArticleRepo interface {
-	UpsertByExternalID(ctx context.Context, a *article.Article) (bool, error)
-}
-
 type FeedClient interface {
 	FetchPage(ctx context.Context, page, pageSize int) (ECBResponse, error)
 }
 
-// ticker is a tiny interface so we can swap out time.Ticker in tests.
+// ticker is an interface so we can swap out time.Ticker in tests.
 type ticker interface {
 	C() <-chan time.Time
 	Stop()
@@ -39,17 +35,16 @@ func (t *timeTicker) Stop() {
 }
 
 type Service struct {
-	repo     ArticleRepo
-	client   FeedClient
-	pageSize int
-	maxPages int
-	maxPolls int
-	logger   *log.Logger
-
+	repo      article.Repository
+	client    FeedClient
+	pageSize  int
+	maxPages  int
+	maxPolls  int
+	logger    *log.Logger
 	newTicker tickerFactory
 }
 
-func NewService(repo ArticleRepo, client FeedClient, pageSize, maxPages, maxPolls int, logger *log.Logger) *Service {
+func NewService(repo article.Repository, client FeedClient, pageSize, maxPages, maxPolls int, logger *log.Logger) *Service {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -68,8 +63,9 @@ func NewService(repo ArticleRepo, client FeedClient, pageSize, maxPages, maxPoll
 }
 
 func (s *Service) RunOnce(ctx context.Context) error {
-	page := 0       // current page
-	emptyCount := 0 // how many times we've seen an empty page (in a row)
+	page := 0                        // current page
+	emptyCount := 0                  // how many times we've seen an empty page (in a row)
+	seen := make(map[int64]struct{}) // prevent writing articles twice in event of data overlap
 
 	for {
 		resp, err := s.client.FetchPage(ctx, page, s.pageSize)
@@ -89,16 +85,28 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			emptyCount = 0
 		}
 
+		batch := make([]*article.Article, 0, len(resp.Content))
+
 		for _, ecbArt := range resp.Content {
+			if _, ok := seen[ecbArt.ID]; ok {
+				continue
+			}
+			seen[ecbArt.ID] = struct{}{}
+
 			art, err := MapECBToArticle(ecbArt)
 			if err != nil {
 				s.logger.Printf("mapping failed for %d: %v", ecbArt.ID, err)
 				continue
 			}
-			_, err = s.repo.UpsertByExternalID(ctx, &art)
+			batch = append(batch, &art)
+		}
+
+		if len(batch) > 0 {
+			changed, err := s.repo.BulkUpsert(ctx, batch)
 			if err != nil {
-				// use the service logger (not the global one) so tests can capture this
-				s.logger.Printf("failed to upsert for %d: %v", ecbArt.ID, err)
+				s.logger.Printf("bulk upsert failed on page %d: %v", page, err)
+			} else {
+				s.logger.Printf("bulk upsert: %d documents changed on page %d", changed, page)
 			}
 		}
 
@@ -136,17 +144,16 @@ func (s *Service) StartPolling(ctx context.Context, interval time.Duration) {
 			return
 
 		case <-t.C():
-			pollCount++
-
-			// EXTRA GUARDBLOCK: stop after max polls
+			// stop after maxPolls
 			if s.maxPolls > 0 && pollCount >= s.maxPolls {
 				s.logger.Printf("poller stopping after %d polls (max reached)", pollCount)
 				return
 			}
 
+			pollCount++
 			s.logger.Printf("poll #%d starting ingestion...", pollCount)
 
-			// TIME-LIMIT THE INVOCATION
+			// hard limit
 			pollCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
 
 			if err := s.RunOnce(pollCtx); err != nil {

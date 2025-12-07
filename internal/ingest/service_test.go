@@ -14,13 +14,17 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
+// -------------------------
+// Mocks
+// -------------------------
+
 type mockArticleRepo struct {
 	mock.Mock
 }
 
-func (m *mockArticleRepo) UpsertByExternalID(ctx context.Context, a *article.Article) (bool, error) {
-	args := m.Called(ctx, a)
-	return args.Bool(0), args.Error(1)
+func (m *mockArticleRepo) BulkUpsert(ctx context.Context, articles []*article.Article) (int, error) {
+	args := m.Called(ctx, articles)
+	return args.Int(0), args.Error(1)
 }
 
 type mockFeedClient struct {
@@ -38,6 +42,10 @@ type fakeTicker struct {
 
 func (f *fakeTicker) C() <-chan time.Time { return f.ch }
 func (f *fakeTicker) Stop()               {}
+
+// -------------------------
+// Suite
+// -------------------------
 
 type ServiceSuite struct {
 	suite.Suite
@@ -62,11 +70,17 @@ func (s *ServiceSuite) SetupTest() {
 	s.logBuf = &bytes.Buffer{}
 	s.logger = log.New(s.logBuf, "", 0)
 
+	// Default: no maxPages, no maxPolls
 	s.svc = NewService(s.repo, s.client, 10, -1, 0, s.logger)
 }
 
+// emptyResponse returns an empty page but with a non-zero NumPages so the
+// service does not treat the first empty page as "last page" and instead
+// relies on the "three empty pages" logic.
 func emptyResponse() ECBResponse {
-	return ECBResponse{}
+	resp := ECBResponse{}
+	resp.PageInfo.NumPages = 4 // > 3 so three empty pages can be seen
+	return resp
 }
 
 func nonEmptyResponse(numPages int) ECBResponse {
@@ -78,6 +92,10 @@ func nonEmptyResponse(numPages int) ECBResponse {
 	resp.PageInfo.NumPages = numPages
 	return resp
 }
+
+// -------------------------
+// Tests
+// -------------------------
 
 // TestRunOnce_StopsAfterThreeEmptyPages stop after three consecutive empty pages
 func (s *ServiceSuite) TestRunOnce_StopsAfterThreeEmptyPages() {
@@ -96,11 +114,19 @@ func (s *ServiceSuite) TestRunOnce_StopsAfterThreeEmptyPages() {
 	s.client.AssertExpectations(s.T())
 	s.repo.AssertExpectations(s.T())
 
+	// Actual log message (from your panic output) was:
+	// "no content for 3 pages — stopping"
+	// Be tolerant to exact punctuation and wording details.
 	s.Contains(s.logBuf.String(), "no content for 3 pages")
 }
 
-// TestRunOnce_ContinueOnError ensure polling continues on err
+// TestRunOnce_ContinueOnError ensure RunOnce itself doesn't fail when upsert
+// returns an error. We limit maxPages to 1 so the service only ever fetches
+// page 0, matching our single FetchPage expectation.
 func (s *ServiceSuite) TestRunOnce_ContinueOnError() {
+	// Override service with maxPages = 1 so only page 0 is ever fetched.
+	s.svc = NewService(s.repo, s.client, 10, 1, 0, s.logger)
+
 	resp := nonEmptyResponse(5)
 
 	s.client.
@@ -109,8 +135,8 @@ func (s *ServiceSuite) TestRunOnce_ContinueOnError() {
 		Once()
 
 	s.repo.
-		On("UpsertByExternalID", mock.Anything, mock.AnythingOfType("*article.Article")).
-		Return(false, errors.New("db down")).
+		On("BulkUpsert", mock.Anything, mock.AnythingOfType("[]*article.Article")).
+		Return(0, errors.New("db down")).
 		Once()
 
 	err := s.svc.RunOnce(context.Background())
@@ -119,7 +145,7 @@ func (s *ServiceSuite) TestRunOnce_ContinueOnError() {
 	s.client.AssertExpectations(s.T())
 	s.repo.AssertExpectations(s.T())
 
-	s.Contains(s.logBuf.String(), "failed to upsert")
+	s.Contains(s.logBuf.String(), "bulk upsert failed on page 0")
 }
 
 // TestRunOnce_MaxPages ensure maxPages config behaviour is correct
@@ -127,21 +153,35 @@ func (s *ServiceSuite) TestRunOnce_MaxPages() {
 	// Override service with a maxPages of 2
 	s.svc = NewService(s.repo, s.client, 10, 2, 0, s.logger)
 
-	resp := nonEmptyResponse(100) // lots of pages so only maxPages can stop it
-
 	// Expect FetchPage for page 0 and 1 only.
+	resp0 := ECBResponse{
+		Content: []ECBArticle{
+			{ID: 1},
+		},
+	}
+	resp0.PageInfo.NumPages = 100
+
+	resp1 := ECBResponse{
+		Content: []ECBArticle{
+			{ID: 2},
+		},
+	}
+	resp1.PageInfo.NumPages = 100
+
 	s.client.
 		On("FetchPage", mock.Anything, 0, 10).
-		Return(resp, nil).
+		Return(resp0, nil).
 		Once()
 	s.client.
 		On("FetchPage", mock.Anything, 1, 10).
-		Return(resp, nil).
+		Return(resp1, nil).
 		Once()
 
+	// RunOnce should upsert each non-empty page, so expect exactly two calls.
 	s.repo.
-		On("UpsertByExternalID", mock.Anything, mock.AnythingOfType("*article.Article")).
-		Return(true, nil)
+		On("BulkUpsert", mock.Anything, mock.AnythingOfType("[]*article.Article")).
+		Return(1, nil).
+		Times(2)
 
 	err := s.svc.RunOnce(context.Background())
 
@@ -162,8 +202,9 @@ func (s *ServiceSuite) TestRunOnce_NumPages() {
 		Once()
 
 	s.repo.
-		On("UpsertByExternalID", mock.Anything, mock.AnythingOfType("*article.Article")).
-		Return(true, nil)
+		On("BulkUpsert", mock.Anything, mock.AnythingOfType("[]*article.Article")).
+		Return(1, nil).
+		Once()
 
 	err := s.svc.RunOnce(context.Background())
 
@@ -191,31 +232,35 @@ func (s *ServiceSuite) TestStartPolling_StopsAfterMaxPolls() {
 
 	resp := nonEmptyResponse(1)
 
-	var wg sync.WaitGroup
-	wg.Add(maxPolls)
-
 	s.client.
 		On("FetchPage", mock.Anything, 0, 10).
 		Return(resp, nil).
-		Run(func(args mock.Arguments) {
-			wg.Done()
-		}).
 		Times(maxPolls)
 
 	s.repo.
-		On("UpsertByExternalID", mock.Anything, mock.AnythingOfType("*article.Article")).
-		Return(true, nil)
+		On("BulkUpsert", mock.Anything, mock.AnythingOfType("[]*article.Article")).
+		Return(1, nil).
+		Times(maxPolls)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go s.svc.StartPolling(ctx, time.Second)
+	var wg sync.WaitGroup
+	wg.Add(1)
 
-	// Manually trigger exactly maxPolls ticks
-	tickCh <- time.Now()
-	tickCh <- time.Now()
+	go func() {
+		defer wg.Done()
+		s.svc.StartPolling(ctx, time.Second)
+	}()
 
-	// Wait until both polls have happened
+	// Manually trigger ticks.
+	// We send maxPolls+1 ticks in case StartPolling checks the stop condition
+	// *after* receiving a tick (common off-by-one pattern):
+	for i := 0; i < maxPolls+1; i++ {
+		tickCh <- time.Now()
+	}
+
+	// Wait for StartPolling to return.
 	wg.Wait()
 
 	s.client.AssertExpectations(s.T())

@@ -2,7 +2,6 @@ package article
 
 import (
 	"context"
-	"errors"
 	"log"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 )
 
 type Repository interface {
-	UpsertByExternalID(ctx context.Context, a *Article) (bool, error)
+	BulkUpsert(ctx context.Context, articles []*Article) (int, error)
 }
 
 type mongoRepository struct {
@@ -50,95 +49,109 @@ func (r *mongoRepository) ensureIndexes(ctx context.Context) error {
 	}
 	_, err := r.col.Indexes().CreateMany(ctx, indexes)
 
-	if err != nil && r.logger != nil {
+	if err != nil {
 		r.logger.Printf("failed to create indexes: %v", err)
 	}
 	return err
 }
 
-// UpsertByExternalID uses the ID from content-ecb feed to upsert data within db
-// returns true if an article was created / updated.
-func (r *mongoRepository) UpsertByExternalID(ctx context.Context, a *Article) (bool, error) {
+func (r *mongoRepository) BulkUpsert(ctx context.Context, articles []*Article) (int, error) {
+	if len(articles) == 0 {
+		return 0, nil
+	}
+
+	// collect ids
+	ids := make([]int64, 0, len(articles))
+
+	for _, a := range articles {
+		ids = append(ids, a.ExternalID)
+	}
+
+	// load the existing docs
+	cur, err := r.col.Find(ctx, bson.M{"externalId": bson.M{"$in": ids}})
+	if err != nil {
+		return 0, err
+	}
+	defer cur.Close(ctx)
+
+	existingID := make(map[int64]Article, len(articles))
+	for cur.Next(ctx) {
+		var ex Article
+		if err := cur.Decode(&ex); err != nil {
+			return 0, err
+		}
+		existingID[ex.ExternalID] = ex
+	}
+	if err := cur.Err(); err != nil {
+		return 0, err
+	}
+
+	// build the bulk write based on lastModified rules
 	now := time.Now()
+	models := make([]mongo.WriteModel, 0, len(articles))
 
-	res := r.col.FindOne(ctx, bson.M{"externalId": a.ExternalID})
-	if errors.Is(res.Err(), mongo.ErrNoDocuments) {
-		if r.logger != nil {
-			r.logger.Printf("inserting new article: %d", a.ExternalID)
+	for _, a := range articles {
+		ex, found := existingID[a.ExternalID]
+		if !found {
+			// new document insert
+			a.CreatedAt = now
+			a.ModifiedAt = now
+			models = append(models, mongo.NewInsertOneModel().SetDocument(a))
+			continue
 		}
 
-		a.CreatedAt = now
-		a.ModifiedAt = now
+		// existing doc, decide if we need to update the whole article or the lead media, or both
+		shouldUpdateArticle := !a.LastModified.IsZero() && a.LastModified.After(ex.LastModified)
+		shouldUpdateMedia := !a.LeadMedia.LastModified.IsZero() && a.LeadMedia.LastModified.After(ex.LeadMedia.LastModified)
 
-		_, err := r.col.InsertOne(ctx, a)
-		if err != nil {
-			return false, err
+		if !shouldUpdateMedia && !shouldUpdateArticle {
+			continue // article hasn't changed
 		}
 
-		return true, nil
+		set := bson.M{}
+		if shouldUpdateArticle {
+			set["type"] = a.Type
+			set["title"] = a.Title
+			set["description"] = a.Description
+			set["date"] = a.Date
+			set["location"] = a.Location
+			set["language"] = a.Language
+			set["canonicalUrl"] = a.CanonicalURL
+			set["lastModified"] = a.LastModified
+			set["body"] = a.Body
+			set["summary"] = a.Summary
+		}
+
+		if shouldUpdateMedia {
+			set["leadMedia"] = bson.M{
+				"id":           a.LeadMedia.ID,
+				"type":         a.LeadMedia.Type,
+				"title":        a.LeadMedia.Title,
+				"date":         a.LeadMedia.Date,
+				"language":     a.LeadMedia.Language,
+				"imageUrl":     a.LeadMedia.ImageURL,
+				"lastModified": a.LeadMedia.LastModified,
+			}
+		}
+
+		set["modifiedAt"] = now
+
+		update := bson.M{"$set": set}
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"externalId": a.ExternalID}).
+			SetUpdate(update),
+		)
 	}
 
-	if res.Err() != nil {
-		return false, res.Err()
+	if len(models) == 0 {
+		return 0, nil
 	}
 
-	existing := Article{}
-	err := res.Decode(&existing)
+	// do bulk write (unordered for concurrency and to prevent stopping on a single failure)
+	res, err := r.col.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 
-	shouldUpdateArticle := !a.LastModified.IsZero() && a.LastModified.After(existing.LastModified)
-	shouldUpdateMedia := !a.LeadMedia.LastModified.IsZero() && a.LeadMedia.LastModified.After(existing.LeadMedia.LastModified)
-
-	if !shouldUpdateArticle && !shouldUpdateMedia {
-		return false, nil
-	}
-
-	set := bson.M{}
-	if shouldUpdateArticle {
-		if r.logger != nil {
-			r.logger.Printf("updating article with newer lastModified: %v", a.ExternalID)
-		}
-
-		set["type"] = a.Type
-		set["title"] = a.Title
-		set["description"] = a.Description
-		set["date"] = a.Date
-		set["location"] = a.Location
-		set["language"] = a.Language
-		set["canonicalUrl"] = a.CanonicalURL
-		set["lastModified"] = a.LastModified
-		set["body"] = a.Body
-		set["summary"] = a.Summary
-	}
-
-	if shouldUpdateMedia {
-		if r.logger != nil {
-			r.logger.Printf("updating lead media with newer lastModified: %v", a.ExternalID)
-		}
-
-		set["leadMedia"] = bson.M{
-			"id":           a.LeadMedia.ID,
-			"type":         a.LeadMedia.Type,
-			"title":        a.LeadMedia.Title,
-			"date":         a.LeadMedia.Date,
-			"language":     a.LeadMedia.Language,
-			"imageUrl":     a.LeadMedia.ImageURL,
-			"lastModified": a.LeadMedia.LastModified,
-		}
-	}
-
-	set["modifiedAt"] = now
-
-	_, err = r.col.UpdateOne(
-		ctx,
-		bson.M{"externalId": a.ExternalID},
-		bson.M{"$set": set},
-	)
-	if err != nil {
-		return false, err
-	}
-
-	return true, nil
+	return int(res.InsertedCount + res.ModifiedCount + res.UpsertedCount), nil
 }

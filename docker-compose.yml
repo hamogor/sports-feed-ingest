@@ -1,33 +1,67 @@
-version: "3.9"
-
 services:
   mongo:
     image: mongo:7
     container_name: news-mongo
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo-init-replica:
+    image: mongo:7
+    depends_on:
+      - mongo
+    entrypoint: >
+      bash -c "
+      mongosh --host mongo:27017 --eval '
+        try {
+          rs.initiate({
+            _id: \"rs0\",
+            members: [{ _id: 0, host: \"mongo:27017\" }]
+          })
+        } catch(e) {
+          // ignore already initialized errors
+          if (!String(e).includes(\"already initialized\")) {
+            throw e
+          }
+        }
+      '
+      "
+    restart: "no"
 
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: news-rabbit
+    # container_name: news-rabbit    # optional; remove if you want to just use `rabbitmq`
     ports:
-      - "5672:5672"      # AMQP
-      - "15672:15672"    # Management UI: http://localhost:15672 (guest/guest)
+      - "5672:5672"
+      - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   app:
     build: .
     container_name: news-sync
     depends_on:
-      - mongo
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
+      mongo:
+        condition: service_started
     environment:
       # Mongo config
-      MONGO_URI: mongodb://mongo:27017
+      MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
       MONGO_DB_NAME: newsdb
 
       # External feed
@@ -35,18 +69,19 @@ services:
 
       # Ingestion config
       PAGE_SIZE: 20
-      MAX_PAGES: 5       # -1 to ingest all pages
-      MAX_POLLS: -1      # -1 for unlimited polling
+      MAX_PAGES: -1
+      MAX_POLLS: -1
       TIMEOUT: 10s
       POLL_INTERVAL: 5s
 
       # RabbitMQ config
+      # if you removed container_name from rabbitmq:
       RABBIT_URI: amqp://guest:guest@rabbitmq:5672/
-      RABBIT_EXCHANGE: cms.sync
-      RABBIT_ROUTING_KEY: article.updated
+      # if you keep container_name: news-rabbit, then use:
+      # RABBIT_URI: amqp://guest:guest@news-rabbit:5672/
 
     ports:
-      - "8080:8080"      # exposes /healthz
+      - "8080:8080"
 
 volumes:
   mongo-data:

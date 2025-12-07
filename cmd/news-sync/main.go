@@ -7,47 +7,47 @@ import (
 	"cortex-task/internal/db"
 	"cortex-task/internal/event"
 	"cortex-task/internal/ingest"
+	"errors"
 	"github.com/gorilla/mux"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
-
+	// Root context cancelled on SIGINT/SIGTERM
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	logger := log.New(os.Stdout, "[news-sync] ", log.LstdFlags|log.Lshortfile)
-
-	healthz(ctx, logger)
 
 	cfg, err := config.FromEnv()
 	if err != nil {
 		logger.Fatalf("failed to load config: %v", err)
 	}
 
+	// Mongo
 	mongoClient, err := db.ConnectMongo(ctx, cfg.MongoURI)
 	if err != nil {
 		logger.Fatalf("failed to connect to db: %v", err)
 	}
-	defer mongoClient.Disconnect(context.Background())
-
 	dbInstance := mongoClient.Database(cfg.MongoDBName)
 
+	// Article repository
 	articleRepo, err := article.NewMongoArticleRepository(dbInstance, logger)
 	if err != nil {
 		logger.Fatalf("failed to init repository: %v", err)
 	}
+	logger.Println("article repository initialised")
 
-	logger.Printf("article repository initialised: %+v\n", articleRepo)
-
+	// Feed client
 	httpClient := &http.Client{Timeout: cfg.Timeout}
 	feedClient := ingest.NewECBClient(cfg.FeedURL, httpClient)
 
-	// Create ingest service
+	// Ingest service (poller)
 	ingestService := ingest.NewService(
 		articleRepo,
 		feedClient,
@@ -57,7 +57,7 @@ func main() {
 		logger,
 	)
 
-	// Create rabbitmq publisher
+	// Event publisher (RabbitMQ)
 	publisher, err := event.NewRabbitPublisher(
 		cfg.RabbitURI,
 		cfg.RabbitExchange,
@@ -75,23 +75,43 @@ func main() {
 		logger,
 	)
 
-	// Start polling & publishing
+	// HTTP health server
+	srv := healthz(logger)
+
+	// Start background workers
 	go ingestService.StartPolling(ctx, cfg.PollInterval)
 	go eventsService.Run(ctx)
 
-	// Block until shutdown signal
+	logger.Println("service started")
+
+	// Block until we receive a signal / ctx cancelled
 	<-ctx.Done()
-	logger.Println("service shutting down...")
-	logger.Println("service started (no ingest wired yet)")
+	logger.Println("shutdown signal received, shutting down...")
+
+	// Unified shutdown context with timeout
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Graceful HTTP shutdown
+	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Graceful Mongo shutdown
+	if err := mongoClient.Disconnect(shutdownCtx); err != nil {
+		logger.Printf("mongo disconnect error: %v", err)
+	}
+
+	logger.Println("shutdown complete")
 }
 
-func healthz(ctx context.Context, logger *log.Logger) *http.Server {
+func healthz(logger *log.Logger) *http.Server {
 	r := mux.NewRouter()
 
-	r.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	r.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
-	}).Methods("GET")
+	}).Methods(http.MethodGet)
 
 	srv := &http.Server{
 		Addr:    ":8080",
@@ -100,16 +120,9 @@ func healthz(ctx context.Context, logger *log.Logger) *http.Server {
 
 	go func() {
 		logger.Printf("HTTP server listening on %s", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Printf("HTTP server error: %v", err)
 		}
-	}()
-
-	// Stop server when context is cancelled
-	go func() {
-		<-ctx.Done()
-		logger.Println("HTTP server shutting down...")
-		_ = srv.Shutdown(context.Background())
 	}()
 
 	return srv

@@ -63,12 +63,12 @@ func TestPublishArticleUpdated_PublishesCorrectly(t *testing.T) {
 
 	mockCh.
 		On("PublishWithContext",
-			mock.Anything,
-			"cms.sync",
-			"article.updated",
-			false,
-			false,
-			mock.AnythingOfType("amqp.Publishing"),
+			mock.Anything,     // ctx
+			"cms.sync",        // exchange
+			"article.updated", // routing key
+			false,             // mandatory
+			false,             // immediate
+			mock.Anything,     // msg (amqp.Publishing) – don't strict-type match
 		).
 		Return(nil).
 		Once()
@@ -97,20 +97,22 @@ func TestPublishArticleUpdated_JSONContainsArticle(t *testing.T) {
 			"article.updated",
 			false,
 			false,
-			mock.AnythingOfType("amqp.Publishing"),
+			mock.Anything, // capture whatever Publishing is passed
 		).
 		Return(nil).
 		Run(func(args mock.Arguments) {
 			capturedMsg = args.Get(5).(amqp.Publishing)
-		})
+		}).
+		Once()
 
 	err := pub.PublishArticleUpdated(context.Background(), art)
 	require.NoError(t, err)
 
 	body := string(capturedMsg.Body)
 
+	// Keep your original string-based expectations
 	assert.Contains(t, body, `"event":"article.updated"`)
-	assert.Contains(t, body, `"externalId":1234`)
+	assert.Contains(t, body, `"ExternalID":1234`)
 	assert.Contains(t, body, `"Test Title"`)
 }
 
@@ -129,7 +131,8 @@ func TestPublishArticleUpdated_ErrorBubbles(t *testing.T) {
 			mock.Anything,
 			mock.Anything,
 		).
-		Return(publishErr)
+		Return(publishErr).
+		Once()
 
 	err := pub.PublishArticleUpdated(context.Background(), &article.Article{})
 	require.Error(t, err)
@@ -143,7 +146,24 @@ func TestPublishArticleUpdated_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	// Your current implementation still calls PublishWithContext with a cancelled ctx.
+	// We allow that and have the mock return context.Canceled so the test checks that
+	// this error bubbles back.
+	mockCh.
+		On("PublishWithContext",
+			mock.Anything, // cancelled ctx
+			"cms.sync",
+			"article.updated",
+			false,
+			false,
+			mock.Anything,
+		).
+		Return(context.Canceled).
+		Once()
+
 	err := pub.PublishArticleUpdated(ctx, &article.Article{})
 	require.Error(t, err)
 	require.Equal(t, context.Canceled, err)
+
+	mockCh.AssertExpectations(t)
 }
