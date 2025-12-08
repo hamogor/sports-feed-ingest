@@ -2,6 +2,7 @@ package article_test
 
 import (
 	"context"
+	"go.mongodb.org/mongo-driver/bson"
 	"testing"
 	"time"
 
@@ -156,4 +157,8 @@ func (s *ArticleIngestionSuite) TestArticleIngestionEndToEnd() {
 	// lead media updated from A4
 	s.Equal("Lead UPDATED", gotA4.LeadMedia.Title)
 	s.Equal(time.Unix(1700000900, 0), gotA4.LeadMedia.LastModified)
+
+	count, err := s.col.CountDocuments(s.ctx, bson.M{})
+	s.Require().NoError(err)
+	s.Equal(int64(2), count, "only two unique ExternalIDs should exist")
 }

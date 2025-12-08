@@ -52,7 +52,7 @@ func newTestPublisher(mockCh *MockAMQPChannel) *RabbitPublisher {
 // Tests
 // -------------------------
 
-func TestPublishArticleUpdated_PublishesCorrectly(t *testing.T) {
+func TestPublishArticleUpdatedPublishesCorrectly(t *testing.T) {
 	mockCh := &MockAMQPChannel{}
 	pub := newTestPublisher(mockCh)
 
@@ -79,7 +79,7 @@ func TestPublishArticleUpdated_PublishesCorrectly(t *testing.T) {
 	mockCh.AssertExpectations(t)
 }
 
-func TestPublishArticleUpdated_JSONContainsArticle(t *testing.T) {
+func TestPublishArticleUpdatedJSONContainsArticle(t *testing.T) {
 	mockCh := &MockAMQPChannel{}
 	pub := newTestPublisher(mockCh)
 
@@ -116,7 +116,7 @@ func TestPublishArticleUpdated_JSONContainsArticle(t *testing.T) {
 	assert.Contains(t, body, `"Test Title"`)
 }
 
-func TestPublishArticleUpdated_ErrorBubbles(t *testing.T) {
+func TestPublishArticleUpdatedErrorBubbles(t *testing.T) {
 	mockCh := &MockAMQPChannel{}
 	pub := newTestPublisher(mockCh)
 
@@ -139,7 +139,7 @@ func TestPublishArticleUpdated_ErrorBubbles(t *testing.T) {
 	require.Equal(t, publishErr, err)
 }
 
-func TestPublishArticleUpdated_ContextCancel(t *testing.T) {
+func TestPublishArticleUpdatedContextCancel(t *testing.T) {
 	mockCh := &MockAMQPChannel{}
 	pub := newTestPublisher(mockCh)
 
