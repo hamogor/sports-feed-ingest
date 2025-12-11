@@ -52,14 +52,14 @@ func FromEnv() (Config, error) {
 	if cfg.MaxPolls, err = getEnvInt(MaxPolls, -1); err != nil {
 		return cfg, fmt.Errorf("invalid %v: %w", MaxPolls, err)
 	}
-	if cfg.MaxPages, err = getEnvInt(MaxPages, 5); err != nil {
+	if cfg.MaxPages, err = getEnvInt(MaxPages, -1); err != nil {
 		return cfg, fmt.Errorf("invalid %v: %w", MaxPages, err)
 	}
 	timeoutStr := getEnv(Timeout, "10s")
 	if cfg.Timeout, err = time.ParseDuration(timeoutStr); err != nil {
 		return cfg, fmt.Errorf("invalid %v: %w", Timeout, err)
 	}
-	pollIntervalStr := getEnv(PollInterval, "5s")
+	pollIntervalStr := getEnv(PollInterval, "1s")
 	if cfg.PollInterval, err = time.ParseDuration(pollIntervalStr); err != nil {
 		return cfg, fmt.Errorf("invalid %v: %w", PollInterval, err)
 	}

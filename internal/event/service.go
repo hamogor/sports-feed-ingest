@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -48,24 +49,24 @@ func (s *Service) Run(ctx context.Context) {
 			continue
 		}
 
-		externalID := extractExternalID(event)
-		if externalID == 0 {
-			s.logger.Printf("events: skip event missing externalId: %v", event)
+		docID, ok := extractDocumentID(event)
+		if !ok || docID == primitive.NilObjectID {
+			s.logger.Printf("events: skip event missing _id in documentKey")
 			continue
 		}
 
 		var a article.Article
-		if err := s.col.FindOne(ctx, bson.M{"externalId": externalID}).Decode(&a); err != nil {
-			s.logger.Printf("events: failed fetching updated article %d: %v", externalID, err)
+		if err := s.col.FindOne(ctx, bson.M{"_id": docID}).Decode(&a); err != nil {
+			s.logger.Printf("events: failed fetching updated article %s: %v", docID.Hex(), err)
 			continue
 		}
 
 		if err := s.publisher.PublishArticleUpdated(ctx, &a); err != nil {
-			s.logger.Printf("events: failed publishing article %d: %v", externalID, err)
+			s.logger.Printf("events: failed publishing article %d: %v", a.ExternalID, err)
 			continue
 		}
 
-		s.logger.Printf("events: published article %d to message bus", externalID)
+		s.logger.Printf("events: published article %d to message bus", a.ExternalID)
 	}
 
 	if err := stream.Err(); err != nil {
@@ -75,11 +76,18 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-func extractExternalID(event bson.M) int64 {
-	if docKey, ok := event["documentKey"].(bson.M); ok {
-		if id, ok := docKey["externalId"].(int64); ok {
-			return id
-		}
+// extractDocumentID extracts the MongoDB _id from the change stream event's documentKey.
+// Change streams always include _id in documentKey, not arbitrary fields like externalId.
+func extractDocumentID(event bson.M) (primitive.ObjectID, bool) {
+	docKey, ok := event["documentKey"].(bson.M)
+	if !ok {
+		return primitive.NilObjectID, false
 	}
-	return 0
+
+	id, ok := docKey["_id"].(primitive.ObjectID)
+	if !ok {
+		return primitive.NilObjectID, false
+	}
+
+	return id, true
 }

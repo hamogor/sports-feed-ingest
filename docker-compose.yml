@@ -72,7 +72,7 @@ services:
       MAX_PAGES: -1
       MAX_POLLS: -1
       TIMEOUT: 10s
-      POLL_INTERVAL: 5s
+      POLL_INTERVAL: 1s
 
       # RabbitMQ config
       # if you removed container_name from rabbitmq:
